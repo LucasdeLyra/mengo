@@ -1,19 +1,33 @@
 const ytdl = require('ytdl-core');
 const {google} = require('googleapis');
-const {google_key} = require('./key.json')
+const {google_key} = require('./key.json');
+const video = require('ffmpeg/lib/video');
+const SpotifyWebApi = require('spotify-web-api-node');
+const { MessageFlags } = require('discord.js');
+
+
 const youtube = google.youtube({
     version: 'v3',
     auth: google_key
-})
+});
+const spotifyApi = new SpotifyWebApi({
+    clientId: 'YOUR_SPOTIFY_CLIENT_ID',
+    clientSecret: 'YOUR_CLIENT_SECRET',
+  });
+
+
+var already_searched = []
+var already_searched_videoID = []
+
 
 const execute = async (message) => {
     if (!message.guild) return;
-    if (!message.member.voice.channel) return message.reply('entra num canal de voz corno');
+    if (!message.member.voice.channel) return message.reply('You are not in a voice channel');
     /* Even faster that way */
 
     voiceChannel = await message.member.voice.channel
     if (typeof queue !== 'undefined' && queue.length){
-        set_queue(message)
+        await set_queue(message)
     }else{
         await set_queue(message)
         if (typeof queue !== 'undefined' && queue.length){
@@ -35,7 +49,7 @@ async function play(message){
         return;
     }
     dispatcher = connection.play(ytdl(queue[0], { filter: 'audioonly'}))
-
+    
     dispatcher.setVolume(0.1)
     
     dispatcher.on("finish", () =>{
@@ -45,24 +59,29 @@ async function play(message){
 }
 
 const set_queue =  async (message) => {
-    commands = (message.content).split(' ')
-    link = commands.slice(1,commands.length).join(' ')
+    let commands = (message.content).split(' ')
+    let link = commands.slice(1,commands.length).join(' ')
+    let isYT = ytdl.validateURL(link)
 
-    if (!ytdl.validateURL(link)){
-        link = `https://www.youtube.com/watch?v=${ await search(link)}`
+    if (!(await valid_spotify_link(message))){
+        if (!isYT){
+            link = `https://www.youtube.com/watch?v=${ await search(link)}`
+        }  
+        else{
+            if (await ageRestricted(ytdl.getVideoID(link)) == true){
+                return message.channel.send('That is age restricted')
+            }
+        }
+        queue = ( typeof queue != 'undefined' && queue instanceof Array ) ? queue : []
+        queue.push(link)
     }
     else{
-        if (await ageRestricted(ytdl.getVideoID(link)) == true){
-            return message.channel.send('Quer escutar pornô no Bot??? Isso é restrito por idade')
-        }
+        await spotify(message)
     }
-    queue = ( typeof queue != 'undefined' && queue instanceof Array ) ? queue : []
-    queue.push(link)
 }
 
 
 const ageRestricted = async (videoId) => {
-    console.log('entrou no ageRestricted')
     try{
         const response = await youtube.videos.list({
             part: 'contentDetails',
@@ -71,7 +90,6 @@ const ageRestricted = async (videoId) => {
             regionCode: 'BR',
             maxResults: 1
         })
-        console.log(response.data.items[0])
         if (response.data.items[0].contentDetails.contentRating.ytRating != null ){
             return true
         }
@@ -79,23 +97,16 @@ const ageRestricted = async (videoId) => {
     }catch(err){
         console.log(err)
     }
-
-    console.log('passou no ageRestricted')
     
     return false
 }
 
 
-var already_searched = []
-var already_searched_videoID = []
-
-
 const search = async (songtitle) => {
-    i = 1
-    is_age_restricted = true
-
+    let i = 0
+    let is_age_restricted = true
     if (already_searched.indexOf(songtitle) == -1){
-        console.log('entrou aqui')
+        console.log('entrou no search')
             try{
                 const response = await youtube.search.list({
                     part: 'snippet',
@@ -107,7 +118,7 @@ const search = async (songtitle) => {
                 while (is_age_restricted && i < 4){
 
                     videoId = response.data.items[i].id.videoId
-                    is_age_restricted = ageRestricted(videoId)
+                    is_age_restricted = await ageRestricted(videoId)
                     i+=1
                 }
             }catch(err){
@@ -116,7 +127,6 @@ const search = async (songtitle) => {
 
             already_searched.push(songtitle)
             already_searched_videoID.push(videoId)
-
             return videoId  
         
     }
@@ -124,9 +134,91 @@ const search = async (songtitle) => {
 };
 
 
+const get_spotify_credential = async () => {
+    await spotifyApi.clientCredentialsGrant().then(
+        function(data) {
+          console.log('The access token expires in ' + data.body['expires_in']);
+          console.log('The access token is ' + data.body['access_token']);
+      
+          // Save the access token so that it's used in future calls
+          spotifyApi.setAccessToken(data.body['access_token']);
+        },
+        function(err) {
+          console.log('Something went wrong when retrieving an access token', err);
+        }
+    );
+}
+
+const refresh_spotify_credential = async () => {
+    spotifyApi.refreshAccessToken().then(
+        function(data) {
+          console.log('The access token has been refreshed!');
+      
+          // Save the access token so that it's used in future calls
+          spotifyApi.setAccessToken(data.body['access_token']);
+        },
+        function(err) {
+          console.log('Could not refresh access token', err);
+        }
+      );
+}
+
+const valid_spotify_link = async (message) => {
+    let commands = (message.content).split(' ')
+    let link = commands.slice(1,commands.length).join(' ')
+    link = link.split('/')
+    if (link[2] != 'open.spotify.com'){
+        return false
+    }
+    return true
+}
+
+
+const spotify = async (message) =>{
+    
+    await get_spotify_credential()
+    let commands = (message.content).split(' ')
+    let link = commands.slice(1,commands.length).join(' ')
+    link = link.split('/')
+    let id = link[link.length-1]
+    console.log(id)
+
+    var to_search = []
+
+
+    await spotifyApi.getPlaylist(id)
+        .then(function(data) {
+            data.body.tracks.items.forEach(item => to_search.push(`${item.track.name} by ${item.track.artists[0].name}`))
+        }, function(err) {
+            console.log('Something went wrong!', err);
+        });
+
+    for (let i=0; i<to_search.length; i++){
+        link =  `https://www.youtube.com/watch?v=${await search(to_search[i])}`
+        queue = ( typeof queue != 'undefined' && queue instanceof Array ) ? queue : []
+        queue.push(link)
+    }
+
+    return message.reply('Some songs may not been found')
+     
+}
+
+
 const skip = async (message) => {
-    if (typeof queue === 'undefined') return message.reply('tu quer pular música inexistente?');
-    return message.reply(`Pulei ${queue[0]}`), await dispatcher.end();
+    if (typeof queue === 'undefined') return message.reply('There is nothing in the queue to skip');
+
+    let id = ytdl.getVideoID(queue[0])
+    if (already_searched_videoID.indexOf(id) == -1){
+        video_title = queue[0]
+    }
+    else{
+        video_title = already_searched[already_searched_videoID.indexOf(id)]
+    }
+
+    message.reply(`Pulei "${video_title}"`)
+
+
+    return await dispatcher.end();
 }
 
 module.exports = {
